@@ -1,6 +1,7 @@
 # Copyright (c) 2023, Tri Dao.
 
 import sys
+import functools
 import warnings
 import os
 import re
@@ -62,6 +63,12 @@ SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_archs() -> str:
+    return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80;90;100;120").split(";")
+
 
 def get_platform():
     """
@@ -138,11 +145,19 @@ ext_modules = []
 
 # We want this even if SKIP_CUDA_BUILD because when we run python setup.py sdist we want the .hpp
 # files included in the source distribution, in case the user compiles from source.
-if IS_ROCM:
-    if not USE_TRITON_ROCM:
-        subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"])
+if os.path.isdir(".git"):
+    subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"], check=True)
+    subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"], check=True)
 else:
-    subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+    if IS_ROCM:
+        if not USE_TRITON_ROCM:
+            assert (
+                os.path.exists("csrc/composable_kernel/example/ck_tile/01_fmha/generate.py")
+            ), "csrc/composable_kernel is missing, please use source distribution or git clone"
+    else:
+        assert (
+            os.path.exists("csrc/cutlass/include/cutlass/cutlass.h")
+        ), "csrc/cutlass is missing, please use source distribution or git clone"
 
 if not SKIP_CUDA_BUILD and not IS_ROCM:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
@@ -159,14 +174,20 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
                 "FlashAttention is only supported on CUDA 11.7 and above.  "
                 "Note: make sure nvcc has a supported version by running nvcc -V."
             )
-    # cc_flag.append("-gencode")
-    # cc_flag.append("arch=compute_75,code=sm_75")
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_80,code=sm_80")
+
+    if "80" in cuda_archs():
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_80,code=sm_80")
     if CUDA_HOME is not None:
-        if bare_metal_version >= Version("11.8"):
+        if bare_metal_version >= Version("11.8") and "90" in cuda_archs():
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
+        if bare_metal_version >= Version("12.8") and "100" in cuda_archs():
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_100,code=sm_100")
+        if bare_metal_version >= Version("12.8") and "120" in cuda_archs():
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_120,code=sm_120")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
@@ -311,10 +332,10 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
         if not os.path.exists("./build"):
             os.makedirs("build")
 
-        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd --output_dir build --receipt 2")
-        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_appendkv --output_dir build --receipt 2")
-        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --output_dir build --receipt 2")
-        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d bwd --output_dir build --receipt 2")
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd", "--output_dir", "build", "--receipt", "2"], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_appendkv", "--output_dir", "build", "--receipt", "2"], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_splitkv", "--output_dir", "build", "--receipt", "2"], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "bwd", "--output_dir", "build", "--receipt", "2"], check=True)
 
         # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
         # See https://github.com/pytorch/pytorch/pull/70650
